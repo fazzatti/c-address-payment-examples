@@ -68,23 +68,27 @@ async function pollForTransfers() {
   }
 
   // Update paging tokens for next poll
-  pagingToken = undefined;
   if (response.latestLedger) {
     lastLedgerStart = response.latestLedger;
   }
 
   // Process events and check for payments to our monitored address
-  if (response.events) {
+  if (response.events && response.events.length > 0) {
     response.events.forEach((event) => {
       try {
         if (!eventsChecked.includes(event.id)) parseEvent(event);
       } catch (error) {
         console.error("Error processing event:", error);
-      } finally {
-        // Update paging token for next poll
-        pagingToken = event.pagingToken;
       }
     });
+
+    // Update cursor from the response for next poll
+    if (response.cursor) {
+      pagingToken = response.cursor;
+    }
+  } else {
+    // No events found, reset paging token
+    pagingToken = undefined;
   }
 
   // Continue polling after 5 seconds
