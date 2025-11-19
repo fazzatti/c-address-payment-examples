@@ -1,26 +1,11 @@
 import { config } from "../config/env.ts";
-import {
-  Account,
-  Address,
-  Keypair,
-  MuxedAccount,
-  nativeToScVal,
-  Operation,
-  xdr,
-} from "stellar-sdk";
+import { nativeToScVal, Operation, xdr } from "stellar-sdk";
 import { TransferTypes } from "../utils/get-type-arg.ts";
 import chalk from "chalk";
-import { readFromJsonFile } from "../utils/io.ts";
-import { Settings } from "../config/settings.types.ts";
+import { getReceiverArg, getSenderArgs } from "./get-transfer-args.ts";
+import { assembleSourceAuthEntry } from "./assemble-source-auth.ts";
 
-const { assetContractId, ioConfig } = config;
-
-const settings = await readFromJsonFile<Settings>(ioConfig.settings);
-
-const gAccountSigner = Keypair.fromSecret(settings.gAccountSecretKey);
-const mAccountSigner = Keypair.fromSecret(settings.mAccountSecretKey);
-const smartWalletContractId = settings.smartWalletContractId;
-const sourceSigner = Keypair.fromSecret(settings.sourceSecretKey);
+const { assetContractId } = config;
 
 /**
  *
@@ -41,7 +26,11 @@ export const assembleTransferOperation = async (
   const fromType = sendType.charAt(0);
   const toType = sendType.charAt(2);
 
-  const amount: bigint = BigInt(150000000); // 15 XLM in stroops
+  // Prepare the raw arguments for the transfer
+  //  from(string): the sender address
+  //  to(string): the receiver address
+  //  amount(bigint): the amount to transfer in stroops (1 XLM = 10^7 stroops)
+  const amount: bigint = BigInt(150000000); // 15 XLM
   const to = getReceiverArg(toType);
   const { from, sourceKeys, smartWalletAuth } = await getSenderArgs(
     fromType,
@@ -49,32 +38,61 @@ export const assembleTransferOperation = async (
     amount
   );
 
+  // Encode the raw arguments into ScVal types
+  // for the contract invocation
   const fromScVal = nativeToScVal(from, { type: "address" });
   const toScVal = nativeToScVal(to, { type: "address" });
   const amountScVal = nativeToScVal(amount.toString(), { type: "i128" });
   const transferArgsScVal = [fromScVal, toScVal, amountScVal];
+
+  // The 'auth' array will be used to include additional
+  // smart contract authorization entries as needed.
+  //
+  // E.g. For C-Address senders, we need to include the smart wallet
+  // authorization entry which authorizes the funds to be spent
+  // from the smart wallet contract.
   const auth: xdr.SorobanAuthorizationEntry[] = [];
 
+  // When assembling the sender args before, if the sender is a C-Address,
+  // we already assemble and provide the smart wallet authorization
+  // entry (smartWalletAuth).
   if (smartWalletAuth) auth.push(smartWalletAuth);
 
+  // When sending via Horizon, we need to also include
+  // the source account authorization entry since there is
+  // no simulation step that would have added it automatically.
+  //
+  // The source account entry indicates that when the invocation
+  // is executed, the source account (which is paying the fees)
+  // authorizes the transaction. So it will accept the envelope
+  // signature as the authorization for this entry requirement.
+  //
+  // In these examples, you can consider the case when a G-Address
+  // is sending the funds and also the source account paying the fees.
+  // By providing this entry, only a single signature in the envelope,
+  // from the G-Address, is sufficient to authorize both the transfer
+  // invocation and the transaction fee payment.
   if (isViaHorizon) {
-    // When using Horizon, we need to add the root authorization entry manually
-    const sourceAuthEntry = await assembleSourceAuthEntry(
+    const sourceAuthEntry = assembleSourceAuthEntry(
       from,
       to,
       amount,
-      assetContractId,
-      sourceKeys
+      assetContractId
     );
     auth.push(sourceAuthEntry);
   }
 
   console.log(
-    `Invoking transfer of ${chalk.green(amount)} units from ${chalk.green(
-      from
-    )} to ${chalk.green(to)} on contract ${chalk.green(assetContractId)}`
+    `Invoking transfer of \n > ${chalk.green(
+      amount
+    )} units \n > from ${chalk.green(from)} \n > to ${chalk.green(
+      to
+    )} \n > on asset contract ${chalk.green(assetContractId)}`
   );
 
+  // Assemble the invoke contract operation for the transfer
+  // function on the asset contract, using the prepared arguments
+  // and authorization entries.
   const operation = Operation.invokeContractFunction({
     contract: assetContractId,
     function: "transfer",
@@ -82,178 +100,12 @@ export const assembleTransferOperation = async (
     auth: auth,
   });
 
-  return { operation, sourceKeys };
-};
-
-/**
- *
- * Assembles a SorobanAuthorizationEntry for a contract sender.
- * Since the bypass-auth contract does not require explicit signatures,
- * we just need to provide an authorization entry with a valid nonce and
- * expiration ledger.
- *
- * For a real smart wallet contract, you would need to sign the invocation
- * with the appropriate keys.
- *
- */
-const assembleContractAuth = async (
-  from: string,
-  to: string,
-  amount: bigint,
-  assetContractId: string
-): Promise<xdr.SorobanAuthorizationEntry> => {
-  const { rpc } = config;
-
-  const randomNonce = new xdr.Int64(
-    Math.floor(Math.random() * 100000000000000000)
-  );
-
-  // The RPC is used here to get the latest ledger
-  // for setting the signature expiration.
-  // This step could be done similarly with Horizon as well.
-  const latestLedger = await rpc.getLatestLedger();
-  const validUntilLedgerSeq = latestLedger.sequence + 100;
-
-  const scValAccount = nativeToScVal(from, { type: "address" });
-  const assetContractAddress = new Address(assetContractId);
-  const authEntry = new xdr.SorobanAuthorizationEntry({
-    credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-      new xdr.SorobanAddressCredentials({
-        address: scValAccount.address(),
-        nonce: randomNonce,
-        signatureExpirationLedger: Number(validUntilLedgerSeq),
-        signature: xdr.ScVal.scvVoid(), // Placeholder, no signature is required for this contract
-      })
-    ),
-    rootInvocation: new xdr.SorobanAuthorizedInvocation({
-      function:
-        xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-          new xdr.InvokeContractArgs({
-            contractAddress: assetContractAddress.toScAddress(),
-            functionName: "transfer",
-            args: [
-              scValAccount,
-              nativeToScVal(to, { type: "address" }),
-              nativeToScVal(amount.toString(), { type: "i128" }),
-            ],
-          })
-        ),
-      subInvocations: [],
-    }),
-  });
-
-  return authEntry;
-};
-
-/**
- * Assembles an authorization entry for the source account.
- * When using RPC, this is automatically handled as a result
- * of the transaction simulation.
- *
- * For Horizon, this process needs to be done manually as there
- * isn't a simulation endpoint available.
- */
-const assembleSourceAuthEntry = async (
-  from: string,
-  to: string,
-  amount: bigint,
-  assetContractId: string,
-  sourceKeys: Keypair
-): Promise<xdr.SorobanAuthorizationEntry> => {
-  const { rpc, networkConfig } = config;
-
-  // The RPC is used here to get the latest ledger
-  // for setting the signature expiration.
-  // This step could be done similarly with Horizon as well.
-  const latestLedger = await rpc.getLatestLedger();
-  const validUntilLedgerSeq = latestLedger.sequence + 100;
-
-  const scValAccount = nativeToScVal(from, { type: "address" });
-  const assetContractAddress = new Address(assetContractId);
-  const authEntry = new xdr.SorobanAuthorizationEntry({
-    credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
-    rootInvocation: new xdr.SorobanAuthorizedInvocation({
-      function:
-        xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-          new xdr.InvokeContractArgs({
-            contractAddress: assetContractAddress.toScAddress(),
-            functionName: "transfer",
-            args: [
-              scValAccount,
-              nativeToScVal(to, { type: "address" }),
-              nativeToScVal(amount.toString(), { type: "i128" }),
-            ],
-          })
-        ),
-      subInvocations: [],
-    }),
-  });
-
-  return authEntry;
-};
-
-/**
- * Used to check if the Receiver is a G-Address, M-Address or C-Address
- */
-const getReceiverArg = (toType: string): string => {
-  if (toType === "g") {
-    // Receiver is a G-Address
-    return gAccountSigner.publicKey();
-  }
-  if (toType === "m") {
-    // Receiver is an M-Address
-    const muxedTo = new MuxedAccount(
-      new Account(mAccountSigner.publicKey(), "0"),
-      settings.memoId
-    );
-    return muxedTo.accountId();
-  }
-  if (toType === "c") {
-    // Receiver is a C-Address
-    return smartWalletContractId;
-  }
-  throw new Error("Invalid 'to' address type");
-};
-
-/**
- * Used to check if the Sender is a G-Address or C-Address
- * and to assemble the necessary authorization for C-Address senders.
- *
- * It also provides the keypair for the transaction source which in the
- * case of a G-address sender is the same as the sender, and in the case
- * of a C-address sender is the sourceSigner from config. The source is necessary
- * for signing the transaction.
- *
- */
-const getSenderArgs = async (
-  fromType: string,
-  to: string,
-  amount: bigint
-): Promise<{
-  from: string;
-  sourceKeys: Keypair;
-  smartWalletAuth?: xdr.SorobanAuthorizationEntry;
-}> => {
-  if (fromType === "g") {
-    // If the Sender is a G-Address
-    return {
-      from: gAccountSigner.publicKey(),
-      sourceKeys: gAccountSigner,
-    };
-  }
-  if (fromType === "c") {
-    // If the Sender is a C-Address
-    const from = smartWalletContractId;
-    return {
-      from,
-      sourceKeys: sourceSigner,
-      smartWalletAuth: await assembleContractAuth(
-        from,
-        to,
-        amount,
-        assetContractId
-      ),
-    };
-  }
-  throw new Error("Invalid 'from' address type");
+  return {
+    operation,
+    sourceKeys,
+    contractId: assetContractId,
+    from,
+    to,
+    amount,
+  };
 };

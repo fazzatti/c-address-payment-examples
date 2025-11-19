@@ -1,10 +1,13 @@
 {
   "tasks": {
+    "build-contract": "stellar contract build",
     "setup": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/setup.ts",
+    "full-setup": "deno task build-contract && deno task setup",
     "send": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/send.ts",
     "send:rpc": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/send-rpc.ts",
     "send:horizon": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/send-horizon.ts",
-    "ingest:rpc": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/ingest-events-rpc.ts"
+    "ingest:rpc": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/ingest-events-rpc.ts",
+    "ingest:horizon": "deno run --allow-env --allow-net --allow-read --allow-write --allow-ffi src/ingest-payments-horizon.ts"
   },
   "compilerOptions": {
     "lib": ["deno.ns", "deno.window", "deno.worker"],
@@ -13,7 +16,7 @@
   "nodeModulesDir": "auto",
   "imports": {
     "chalk": "npm:chalk@^5.6.2",
-    "stellar-sdk": "npm:@stellar/stellar-sdk@^14.0.0",
+    "stellar-sdk": "npm:@stellar/stellar-sdk@^14.3.3",
     "@colibri/core": "jsr:@colibri/core@^0.6.0",
     "buffer": "npm:buffer@^6.0.3"
   }

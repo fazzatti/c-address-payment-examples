@@ -1,3 +1,18 @@
+/**
+ * This Script sets up the environment for executing
+ * transfers to and from a smart contract using various account types.
+ *
+ * It generates a configuration file containing:
+ * {
+ * "smartWalletContractId": CBFWE...(The deployed smart wallet contract ID),
+ * "gAccountSecretKey": "SD3K5... (secret key for G-Account)",
+ * "mAccountSecretKey": "SDFKJ3... (secret key for Muxed Address underlying G-Account)",
+ * "sourceSecretKey": "SDJFK3... (secret key for the source account covering the network
+ * fees when sending a payment from the contract)",
+ * "memoId": 12345... (The memo ID to use when sending from Muxed Address)
+ * }
+ */
+
 import { config } from "./config/env.ts";
 import {
   LocalSigner,
@@ -9,7 +24,7 @@ import {
   Ed25519SecretKey,
 } from "@colibri/core";
 import { loadWasmFile } from "./utils/load-wasm.ts";
-import { transferSetup } from "./transactions/transfer-setup.ts";
+import { transferSetup } from "./core/transfer-setup.ts";
 import { Asset, Keypair } from "stellar-sdk";
 import chalk from "chalk";
 import { saveToJsonFile } from "./utils/io.ts";

@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import { getArgs } from "./get-args.ts";
 
 export const transferTypes = [
@@ -10,12 +11,30 @@ export const transferTypes = [
 ] as const;
 export type TransferTypes = (typeof transferTypes)[number];
 
-export const getTypeArg = (): TransferTypes => {
+export const getTypeArg = (
+  supported: readonly TransferTypes[]
+): TransferTypes => {
   const cmdArgs = getArgs(1);
 
   if (cmdArgs && cmdArgs.length && cmdArgs.length === 1) {
     const normalizedArg = cmdArgs[0].toLowerCase();
     if (transferTypes.includes(normalizedArg as TransferTypes)) {
+      if (!supported.includes(normalizedArg as TransferTypes)) {
+        console.error(
+          chalk.red(
+            `Unsupported example: ${getTypeText(
+              normalizedArg as TransferTypes
+            )}!`
+          )
+        );
+        console.log(
+          `This example only supports the following types: ${supported.join(
+            ", "
+          )}`
+        );
+        Deno.exit(1);
+      }
+
       return normalizedArg as TransferTypes;
     } else {
       throw new Error(

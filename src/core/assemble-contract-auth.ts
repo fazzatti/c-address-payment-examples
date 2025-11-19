@@ -1,29 +1,24 @@
-import {
-  Address,
-  authorizeEntry,
-  Keypair,
-  nativeToScVal,
-  Transaction,
-  xdr,
-  XdrLargeInt,
-} from "stellar-sdk";
+import { Address, nativeToScVal, xdr } from "stellar-sdk";
 import { config } from "../config/env.ts";
 
-const addRootEntryAuth = async (
-  op: xdr.Operation,
-  sourceKeys: Keypair
-): xdr.Operation => {
-  const authEntry = await assembleRootAuth();
-};
-
-const assembleRootAuth = async (
+/**
+ *
+ * Assembles a SorobanAuthorizationEntry for a contract sender.
+ * Since the bypass-auth contract does not require explicit signatures,
+ * we just need to provide an authorization entry with a valid nonce and
+ * expiration ledger.
+ *
+ * For a real smart wallet contract, you would need to sign the invocation
+ * with the appropriate keys.
+ *
+ */
+export const assembleContractAuth = async (
   from: string,
   to: string,
   amount: bigint,
-  assetContractId: string,
-  sourceKeys: Keypair
+  assetContractId: string
 ): Promise<xdr.SorobanAuthorizationEntry> => {
-  const { rpc, networkConfig } = config;
+  const { rpc } = config;
 
   const randomNonce = new xdr.Int64(
     Math.floor(Math.random() * 100000000000000000)
@@ -38,7 +33,14 @@ const assembleRootAuth = async (
   const scValAccount = nativeToScVal(from, { type: "address" });
   const assetContractAddress = new Address(assetContractId);
   const authEntry = new xdr.SorobanAuthorizationEntry({
-    credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+    credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+      new xdr.SorobanAddressCredentials({
+        address: scValAccount.address(),
+        nonce: randomNonce,
+        signatureExpirationLedger: Number(validUntilLedgerSeq),
+        signature: xdr.ScVal.scvVoid(), // Placeholder, no signature is required for this contract
+      })
+    ),
     rootInvocation: new xdr.SorobanAuthorizedInvocation({
       function:
         xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
@@ -56,12 +58,5 @@ const assembleRootAuth = async (
     }),
   });
 
-  const signedEntry = await authorizeEntry(
-    authEntry,
-    sourceKeys,
-    validUntilLedgerSeq,
-    networkConfig.networkPassphrase
-  );
-
-  return signedEntry;
+  return authEntry;
 };
