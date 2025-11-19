@@ -9,7 +9,6 @@ import chalk from "chalk";
 const { rpc, assetContractId, ioConfig } = config;
 
 const settings = await readFromJsonFile<Settings>(ioConfig.settings);
-
 const gAccountSigner = LocalSigner.fromSecret(settings.gAccountSecretKey);
 const mAccountSigner = LocalSigner.fromSecret(settings.mAccountSecretKey);
 const smartWalletContractId = settings.smartWalletContractId;
@@ -39,24 +38,34 @@ async function pollForTransfers() {
     `> Monitoring transfers for ledger: ${chalk.blueBright(lastLedgerStart)}`
   );
 
+  // Build request based on pagination state
+  const filters = [
+    {
+      contractIds: [assetContractId],
+      // Filter for transfer events to the monitored address
+      // Using wildcards (*) to match any sender and asset
+      // Event structure: ["transfer", fromAddress, toAddress, assetName]
+      topics: [
+        [xdr.ScVal.scvSymbol("transfer").toXDR("base64"), "*", "*", "*"],
+      ],
+      type: "contract" as const,
+    },
+  ];
+
   // Get events for "transfer" topic from the native asset contract
-  const response = await rpc.getEvents({
-    startLedger: !pagingToken ? lastLedgerStart : undefined,
-    cursor: pagingToken,
-    filters: [
-      {
-        contractIds: [assetContractId],
-        // Filter for transfer events to the monitored address
-        // Using wildcards (*) to match any sender and asset
-        // Event structure: ["transfer", fromAddress, toAddress, assetName]
-        topics: [
-          [xdr.ScVal.scvSymbol("transfer").toXDR("base64"), "*", "*", "*"],
-        ],
-        type: "contract",
-      },
-    ],
-    limit: 10,
-  });
+  let response;
+  if (pagingToken) {
+    response = await rpc.getEvents({ cursor: pagingToken, filters, limit: 10 });
+  } else {
+    // Get latest ledger to use as endLedger
+    const latestLedger = await rpc.getLatestLedger();
+    response = await rpc.getEvents({
+      startLedger: lastLedgerStart,
+      endLedger: latestLedger.sequence,
+      filters,
+      limit: 10,
+    });
+  }
 
   // Update paging tokens for next poll
   pagingToken = undefined;
@@ -82,11 +91,13 @@ async function pollForTransfers() {
   setTimeout(pollForTransfers, 5000);
 }
 
+/**
+ *  Parses an event and checks if it's a payment to the monitored address.
+ *  If so, processes the payment record.
+ */
 const parseEvent = (event: Api.EventResponse) => {
   const topics = event.topic;
-  console.log(
-    chalk.gray(`Processing event: ${event.txHash} at ledger ${event.ledger}`)
-  );
+
   eventsChecked.push(event.id);
   if (topics && topics.length >= 3) {
     // Extract recipient address from event topics
@@ -94,43 +105,77 @@ const parseEvent = (event: Api.EventResponse) => {
 
     // Check if the payment is to our monitored address
     if (monitoredAddresses.some((addr) => toAddress === addr.toString())) {
-      console.log(chalk.blue("\nPAYMENT RECEIVED!"));
-      console.log(`  Transaction: ${event.txHash}`);
-      console.log(`  Ledger: ${event.ledger}`);
-      console.log(
-        `  Sender: ${Address.fromScAddress(topics[1].address()).toString()}`
-      );
-      console.log(
-        `  Receiver: ${Address.fromScAddress(topics[2].address()).toString()}`
-      );
+      console.log(chalk.blue("\n> SAC EVENT RECEIVED!"));
 
       const isMuxed = event.value.switch().name === xdr.ScValType.scvMap().name;
 
-      if (isMuxed) {
-        console.log(chalk.blue("  (Receiver is a muxed account)"));
+      let amount: string = "";
+      let muxedId: string | undefined;
 
+      //
+      // When the receiver is a muxed account, the event value
+      // is a map containing both the amount and the muxed ID.
+      //
+      // Otherwise, the event value is just the amount as i128.
+      //
+      if (isMuxed) {
         event.value
           .map()
           ?.entries()
           .forEach(([_key, entry]) => {
             if (entry.val().switch().name === xdr.ScValType.scvI128().name) {
-              console.log(`  Amount: ${entry.val().i128().lo().toBigInt()}`);
+              amount = `${entry.val().i128().lo().toBigInt()}`;
               return;
             }
             if (entry.val().switch().name === xdr.ScValType.scvU64().name) {
-              console.log(
-                `  Memo ID: ${chalk.blueBright(entry.val().u64().toBigInt())}\n`
-              );
+              muxedId = `${entry.val().u64().toBigInt()}`;
               return;
             }
             throw new Error("Unexpected map entry in muxed payment event");
           });
       } else {
-        console.log(chalk.gray("  (Receiver is NOT a muxed account)"));
-        console.log(`  Amount: ${event.value.i128().lo().toBigInt()}\n`);
+        amount = `${event.value.i128().lo().toBigInt()}`;
       }
+
+      processEvent({
+        ledger: event.ledger.toString(),
+        from: Address.fromScAddress(topics[1].address()).toString(),
+        to: Address.fromScAddress(topics[2].address()).toString(),
+        amount: amount,
+        muxedId: muxedId,
+      });
     }
   }
+};
+
+/**
+ *  Here the payment record would be processed. In this example,
+ *  we just log the details to the console.
+ */
+const processEvent = ({
+  ledger,
+  from,
+  to,
+  amount,
+  muxedId,
+}: {
+  ledger: string;
+  from: string;
+  to: string;
+  amount: string;
+  muxedId?: string;
+}) => {
+  const code = "XLM"; // We are only monitoring the XLM contract id
+
+  console.log(chalk.blue(` Ledger: ${chalk.green(ledger)}`));
+  console.log(chalk.blue(` From: ${chalk.green(from)}`));
+  console.log(chalk.blue(` To: ${chalk.green(to)}`));
+  console.log(chalk.blue(` Amount: ${chalk.green(amount)} ${code}`));
+  // Handle muxed accounts
+  if (muxedId !== undefined) {
+    console.log(chalk.blue(` Muxed ID: ${muxedId}`));
+  }
+  console.log(chalk.cyan("\nWaiting for new payments..."));
 };
 
 // Start monitoring for payment events
